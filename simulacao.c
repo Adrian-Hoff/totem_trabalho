@@ -4,15 +4,20 @@
 #include "tad_configs.h"
 #include "queue_list/queue.h"
 #include "fila/novo_cliente_fila.h"
+#include "pqueue/pqueue.h"
+
 pthread_mutex_t mutex_fila = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct
+{
+    QueueManager *fila_comum;
+    Bno *raiz_btree;
+    int *ultimo_id;
+} PollArgs;
 
 void *poll_thread(void *arg)
 {
-    struct
-    {
-        QueueManager *queueManager;
-        int *ultimo_id;
-    } *data = arg;
+    PollArgs *data = (PollArgs *)arg;
 
     while (1)
     {
@@ -29,7 +34,23 @@ void *poll_thread(void *arg)
             *novo_item = temp_item;
 
             pthread_mutex_lock(&mutex_fila);
-            adicionar_fim(novo_item, data->queueManager);
+            if (novo_item->prioridade == 6)
+            {
+                adicionar_fim(novo_item, data->fila_comum);
+            }
+            else
+            {
+                Bno *no_prioridade = procurar_na_btree(data->raiz_btree, novo_item->prioridade);
+                if (!no_prioridade || !no_prioridade->queueManager)
+                {
+                    printf("Erro: prioridade %d não está na árvore ou fila não inicializada!\n", novo_item->prioridade);
+                    free(novo_item);
+                    pthread_mutex_unlock(&mutex_fila); // 👈 OBRIGATÓRIO AQUI
+                    continue;
+                }
+
+                adicionar_fim(novo_item, no_prioridade->queueManager);
+            }
             pthread_mutex_unlock(&mutex_fila);
 
             *(data->ultimo_id) = temp_item.id;
@@ -40,55 +61,66 @@ void *poll_thread(void *arg)
     return NULL;
 }
 
-void simular(QueueManager *queueManager)
+void simular(QueueManager *fila_comum, Bno **raiz_ptr)
 {
-    if (queueManager->primeiro == NULL)
+    pthread_mutex_lock(&mutex_fila);
+
+    // 1) espiar o próximo de cada fila
+    Item *prox_prio = peek_paciente_prioridade(*raiz_ptr);
+    Item *prox_comum = fila_comum->primeiro
+                           ? fila_comum->primeiro->item
+                           : NULL;
+
+    if (prox_prio)
     {
-        printf("Não há pacientes na lista.\n");
-        return;
-    }
-
-    Item *simular_item = queueManager->primeiro->item;
-
-    if (simular_item->id > -1)
-    {
-        printf("Simulando paciente %d, %dsegs...\n", simular_item->id, simular_item->tempo_processamento);
-
-        No *fno = queueManager->primeiro;
-        printf("  fila: ");
-
-        while (fno != NULL)
-        {
-            printf(" %d,", fno->item->id);
-            fno = fno->proximo;
-        }
-        printf("\n");
-        sleep(simular_item->tempo_processamento);
-
-        pthread_mutex_lock(&mutex_fila);
-        remover_inicio(queueManager);
-        pthread_mutex_unlock(&mutex_fila);
-
-        No *no = queueManager->primeiro;
-        printf("  atendimento finalizado -> fila: ");
-
-        while (no != NULL)
-        {
-            printf("%d, ", no->item->id);
-            no = no->proximo;
-        }
-
-        printf("\n\n");
+        printf("Próximo com prioridade: F%d\n", prox_prio->id);
     }
     else
     {
-        printf("não há pacientes na lista");
+        printf("Próximo com prioridade: Fila de prioridade vazia.\n");
+    }
+
+    if (prox_comum)
+    {
+        printf("Próximo sem prioridade: F%d\n", prox_comum->id);
+    }
+    else
+    {
+        printf("Próximo sem prioridade: Fila comum vazia.\n");
+    }
+
+    // 2) decidir de onde remover
+    Item *atender = NULL;
+    if (!btree_vazia(*raiz_ptr))
+    {
+        atender = remover_da_btree(raiz_ptr);
+    }
+    else if (fila_comum->primeiro)
+    {
+        atender = fila_comum->primeiro->item;
+        remover_inicio(fila_comum);
+    }
+
+    pthread_mutex_unlock(&mutex_fila);
+
+    // 3) simular o atendimento
+    if (atender)
+    {
+        printf("Simulando paciente %d por %d segundos...\n",
+               atender->id, atender->tempo_processamento);
+        sleep(atender->tempo_processamento);
+        printf("Atendimento finalizado!\n\n");
+    }
+    else
+    {
+        printf("Nenhum paciente para simular.\n\n");
     }
 }
 
 int main()
 {
     TadConfigs *tad_configs;
+    Bno *raiz_btree = btree_initialize();
     QueueManager *queueManager;
     Item *item_inicial;
 
@@ -114,12 +146,11 @@ int main()
     printf("\nultimo id lido: %d\n", ultimo_id_lido);
 
     //--------------
-    struct
-    {
-        QueueManager *queue;
-        int *ultimo_id;
-    } poll_args = {queueManager, &ultimo_id_lido};
 
+    PollArgs poll_args = {
+        .fila_comum = queueManager,
+        .raiz_btree = raiz_btree,
+        .ultimo_id = &ultimo_id_lido};
     pthread_t thread;
     pthread_create(&thread, NULL, poll_thread, &poll_args);
     //------------
@@ -128,9 +159,13 @@ int main()
     {
         usleep(1000 * 1000);
         // arquivo_abrir();
+        printf("\n======== ÁRVORE DE PRIORIDADE ========\n");
+        btree_print(raiz_btree);
+        printf("======================================\n\n");
+
         if (tad_configs->configs.status == SIMULAR)
         {
-            simular(queueManager);
+            simular(queueManager, &raiz_btree);
             // test(1, queueManager);
         }
         else
